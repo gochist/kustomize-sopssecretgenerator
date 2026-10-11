@@ -14,14 +14,17 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/GoogleContainerTools/kpt-functions-sdk/go/fn"
-	"github.com/pkg/errors"
 	"github.com/getsops/sops/v3"
+	"github.com/getsops/sops/v3/aes"
+	"github.com/getsops/sops/v3/cmd/sops/common"
 	"github.com/getsops/sops/v3/cmd/sops/formats"
-	"github.com/getsops/sops/v3/decrypt"
+	"github.com/getsops/sops/v3/config"
+	"github.com/pkg/errors"
 	"gopkg.in/yaml.v3"
 )
 
@@ -57,6 +60,8 @@ type SopsSecretGenerator struct {
 	ObjectMeta            `json:"metadata" yaml:"metadata"`
 	EnvSources            []string `json:"envs" yaml:"envs"`
 	FileSources           []string `json:"files" yaml:"files"`
+	InputType             string   `json:"input-type,omitempty" yaml:"input-type,omitempty"`
+	OutputType            string   `json:"output-type,omitempty" yaml:"output-type,omitempty"`
 	Behavior              string   `json:"behavior,omitempty" yaml:"behavior,omitempty"`
 	DisableNameSuffixHash bool     `json:"disableNameSuffixHash,omitempty" yaml:"disableNameSuffixHash,omitempty"`
 	Type                  string   `json:"type,omitempty" yaml:"type,omitempty"`
@@ -247,20 +252,74 @@ func readInput(manifestContent []byte) (SopsSecretGenerator, error) {
 
 func parseInput(input SopsSecretGenerator) (kvMap, error) {
 	data := make(kvMap)
-	err := parseEnvSources(input.EnvSources, data)
+	if err := validateSopsFormat(input.InputType); err != nil {
+		return nil, errors.Wrap(err, "input-type")
+	}
+	if err := validateSopsFormat(input.OutputType); err != nil {
+		return nil, errors.Wrap(err, "output-type")
+	}
+	err := parseEnvSourcesWithTypes(input.EnvSources, data, input.InputType, input.OutputType)
 	if err != nil {
 		return nil, err
 	}
-	err = parseFileSources(input.FileSources, data)
+	err = parseFileSourcesWithTypes(input.FileSources, data, input.InputType, input.OutputType)
 	if err != nil {
 		return nil, err
 	}
 	return data, nil
 }
 
+func validateSopsFormat(format string) error {
+	switch format {
+	case "", "binary", "dotenv", "ini", "json", "yaml":
+		return nil
+	default:
+		return fmt.Errorf("unsupported SOPS format %q (valid formats: binary, dotenv, ini, json, yaml)", format)
+	}
+}
+
+func parseSopsSourceOptions(source, inputType, outputType string) (string, string, string, error) {
+	inputMarker := strings.Index(source, ":input-type=")
+	outputMarker := strings.Index(source, ":output-type=")
+	marker := -1
+	if inputMarker >= 0 && (outputMarker < 0 || inputMarker < outputMarker) {
+		marker = inputMarker
+	} else if outputMarker >= 0 {
+		marker = outputMarker
+	}
+	if marker < 0 {
+		return source, inputType, outputType, nil
+	}
+
+	options := source[marker+1:]
+	source = source[:marker]
+	for _, option := range strings.Split(options, ",") {
+		name, value, found := strings.Cut(option, "=")
+		if !found || value == "" {
+			return "", "", "", fmt.Errorf("invalid source option %q", option)
+		}
+		if err := validateSopsFormat(value); err != nil {
+			return "", "", "", err
+		}
+		switch name {
+		case "input-type":
+			inputType = value
+		case "output-type":
+			outputType = value
+		default:
+			return "", "", "", fmt.Errorf("unknown source option %q", name)
+		}
+	}
+	return source, inputType, outputType, nil
+}
+
 func parseEnvSources(sources []string, data kvMap) error {
+	return parseEnvSourcesWithTypes(sources, data, "", "")
+}
+
+func parseEnvSourcesWithTypes(sources []string, data kvMap, inputType, outputType string) error {
 	for _, source := range sources {
-		err := parseEnvSource(source, data)
+		err := parseEnvSourceWithTypes(source, data, inputType, outputType)
 		if err != nil {
 			return errors.Wrapf(err, "env source \"%s\"", source)
 		}
@@ -269,12 +328,20 @@ func parseEnvSources(sources []string, data kvMap) error {
 }
 
 func parseEnvSource(source string, data kvMap) error {
-	decrypted, err := decryptFile(source)
+	return parseEnvSourceWithTypes(source, data, "", "")
+}
+
+func parseEnvSourceWithTypes(source string, data kvMap, inputType, outputType string) error {
+	source, inputType, outputType, err := parseSopsSourceOptions(source, inputType, outputType)
+	if err != nil {
+		return err
+	}
+	decrypted, format, err := decryptFileWithTypes(source, inputType, outputType)
 	if err != nil {
 		return err
 	}
 
-	switch formats.FormatForPath(source) {
+	switch format {
 	case formats.Dotenv:
 		err = parseDotEnvContent(decrypted, data)
 	case formats.Yaml:
@@ -354,8 +421,12 @@ func parseJSONContent(content []byte, data kvMap) error {
 }
 
 func parseFileSources(sources []string, data kvMap) error {
+	return parseFileSourcesWithTypes(sources, data, "", "")
+}
+
+func parseFileSourcesWithTypes(sources []string, data kvMap, inputType, outputType string) error {
 	for _, source := range sources {
-		err := parseFileSource(source, data)
+		err := parseFileSourceWithTypes(source, data, inputType, outputType)
 		if err != nil {
 			return errors.Wrapf(err, "file source \"%s\"", source)
 		}
@@ -364,25 +435,63 @@ func parseFileSources(sources []string, data kvMap) error {
 }
 
 func decryptFile(source string) ([]byte, error) {
+	decrypted, _, err := decryptFileWithTypes(source, "", "")
+	return decrypted, err
+}
+
+func decryptFileWithTypes(source, inputType, outputType string) ([]byte, formats.Format, error) {
 	content, err := ioutil.ReadFile(source)
 	if err != nil {
-		return nil, errors.Wrap(err, "could not read file")
+		return nil, formats.Binary, errors.Wrap(err, "could not read file")
 	}
 
-	decrypted, err := decrypt.DataWithFormat(content, formats.FormatForPath(source))
+	inputFormat := formats.FormatForPathOrString(source, inputType)
+	outputFormat := formats.FormatForPathOrString(source, outputType)
+	storesConfig := config.NewStoresConfig()
+	inputStore := common.StoreForFormat(inputFormat, storesConfig)
+	outputStore := common.StoreForFormat(outputFormat, storesConfig)
+	tree, err := inputStore.LoadEncryptedFile(content)
 	if err != nil {
-		return nil, errors.Wrap(err, "sops could not decrypt")
+		return nil, outputFormat, errors.Wrap(err, "sops could not decrypt")
 	}
-	return decrypted, nil
+	key, err := tree.Metadata.GetDataKey()
+	if err != nil {
+		return nil, outputFormat, errors.Wrap(err, "sops could not decrypt")
+	}
+	cipher := aes.NewCipher()
+	mac, err := tree.Decrypt(key, cipher)
+	if err != nil {
+		return nil, outputFormat, errors.Wrap(err, "sops could not decrypt")
+	}
+	originalMac, err := cipher.Decrypt(tree.Metadata.MessageAuthenticationCode, key, tree.Metadata.LastModified.Format(time.RFC3339))
+	if err != nil {
+		return nil, outputFormat, errors.Wrap(err, "sops could not verify data integrity")
+	}
+	if originalMac != mac {
+		return nil, outputFormat, errors.Errorf("sops could not verify data integrity: expected MAC %q, got %q", originalMac, mac)
+	}
+	decrypted, err := outputStore.EmitPlainFile(tree.Branches)
+	if err != nil {
+		return nil, outputFormat, errors.Wrap(err, "sops could not emit decrypted data")
+	}
+	return decrypted, outputFormat, nil
 }
 
 func parseFileSource(source string, data kvMap) error {
+	return parseFileSourceWithTypes(source, data, "", "")
+}
+
+func parseFileSourceWithTypes(source string, data kvMap, inputType, outputType string) error {
+	source, inputType, outputType, err := parseSopsSourceOptions(source, inputType, outputType)
+	if err != nil {
+		return err
+	}
 	key, fn, err := parseFileName(source)
 	if err != nil {
 		return err
 	}
 
-	decrypted, err := decryptFile(fn)
+	decrypted, _, err := decryptFileWithTypes(fn, inputType, outputType)
 	if err != nil {
 		return err
 	}

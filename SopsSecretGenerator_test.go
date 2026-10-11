@@ -13,9 +13,10 @@ import (
 	"testing"
 
 	"github.com/GoogleContainerTools/kpt-functions-sdk/go/fn"
+	"github.com/getsops/sops/v3/cmd/sops/formats"
+	"github.com/getsops/sops/v3/pgp"
 	"github.com/lithammer/dedent"
 	"github.com/pkg/errors"
-	"github.com/getsops/sops/v3/pgp"
 )
 
 const testkeyFingerprint = "2D2483DF73A3A0FAEE3C2A695BDC395360CE8FF4"
@@ -416,6 +417,92 @@ func Test_parseEnvSource(t *testing.T) {
 				t.Errorf("parseEnvSource() got = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func Test_decryptFileSupportsInputAndOutputTypes(t *testing.T) {
+	content, err := os.ReadFile("testdata/file.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := t.TempDir() + "/file.enc"
+	if err := os.WriteFile(source, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, format, err := decryptFileWithTypes(source, "json", "yaml")
+	if err != nil {
+		t.Fatalf("decryptFileWithTypes() error = %v", err)
+	}
+	if string(got) != "var: secret\n" {
+		t.Errorf("decryptFileWithTypes() = %q, want %q", got, "var: secret\n")
+	}
+	if format != formats.Yaml {
+		t.Errorf("decryptFileWithTypes() format = %v, want yaml", format)
+	}
+}
+
+func Test_readInputSupportsSopsTypes(t *testing.T) {
+	manifest := []byte("apiVersion: goabout.com/v1beta1\nkind: SopsSecretGenerator\nmetadata:\n  name: test\ninput-type: json\noutput-type: yaml\n")
+	got, err := readInput(manifest)
+	if err != nil {
+		t.Fatalf("readInput() error = %v", err)
+	}
+	if got.InputType != "json" || got.OutputType != "yaml" {
+		t.Errorf("readInput() types = (%q, %q), want (json, yaml)", got.InputType, got.OutputType)
+	}
+}
+
+func Test_parseInputRejectsUnknownSopsType(t *testing.T) {
+	_, err := parseInput(SopsSecretGenerator{InputType: "toml"})
+	if err == nil || !strings.Contains(err.Error(), "unsupported SOPS format") {
+		t.Errorf("parseInput() error = %v, want unsupported format error", err)
+	}
+}
+
+func Test_parseInputUsesPerSourceTypes(t *testing.T) {
+	tempDir := t.TempDir()
+	sources := []struct {
+		fixture    string
+		name       string
+		inputType  string
+		outputType string
+		want       string
+	}{
+		{"testdata/file.json", "json.enc", "json", "yaml", "var: secret\n"},
+		{"testdata/file.env", "dotenv.enc", "dotenv", "dotenv", "VAR=secret\n"},
+	}
+	input := SopsSecretGenerator{}
+	for _, source := range sources {
+		content, err := os.ReadFile(source.fixture)
+		if err != nil {
+			t.Fatal(err)
+		}
+		filename := tempDir + "/" + source.name
+		if err := os.WriteFile(filename, content, 0600); err != nil {
+			t.Fatal(err)
+		}
+		input.FileSources = append(input.FileSources, filename+":input-type="+source.inputType+",output-type="+source.outputType)
+	}
+
+	got, err := parseInput(input)
+	if err != nil {
+		t.Fatalf("parseInput() error = %v", err)
+	}
+	for _, source := range sources {
+		key := source.name
+		if got[key] != b64(source.want) {
+			t.Errorf("parseInput()[%q] = %q, want %q", key, got[key], b64(source.want))
+		}
+	}
+}
+
+func Test_parseSopsSourceOptions(t *testing.T) {
+	source, inputType, outputType, err := parseSopsSourceOptions("secret=secrets.enc:input-type=json,output-type=yaml", "", "")
+	if err != nil {
+		t.Fatalf("parseSopsSourceOptions() error = %v", err)
+	}
+	if source != "secret=secrets.enc" || inputType != "json" || outputType != "yaml" {
+		t.Errorf("parseSopsSourceOptions() = (%q, %q, %q), want (secret=secrets.enc, json, yaml)", source, inputType, outputType)
 	}
 }
 
