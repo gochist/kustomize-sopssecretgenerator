@@ -1,3 +1,5 @@
+version: 2
+
 project_name: kustomize-sopssecretgenerator
 
 env:
@@ -30,7 +32,7 @@ builds:
         goarch: arm64
 
 archives:
-  - format: binary
+  - formats: [binary]
 
 changelog:
   filters:
@@ -43,42 +45,8 @@ checksum:
 
 release:
   github:
-    owner: goabout
+    owner: gochist
     name: kustomize-sopssecretgenerator
   name_template: "Version {{.Version}}"
-
-dockers:
-  - goos: linux
-    goarch: amd64
-    dockerfile: .goreleaser.Dockerfile
-    image_templates:
-      - "goabout/kustomize-sopssecretgenerator:latest-amd64"
-      - "goabout/kustomize-sopssecretgenerator:v{{ .Major }}-amd64"
-      - "goabout/kustomize-sopssecretgenerator:v{{ .Major }}.{{ .Minor }}-amd64"
-      - "goabout/kustomize-sopssecretgenerator:v{{ .Major }}.{{ .Minor }}.{{ .Patch }}-amd64"
-  - goos: linux
-    goarch: arm64
-    dockerfile: .goreleaser.Dockerfile
-    image_templates:
-      - "goabout/kustomize-sopssecretgenerator:latest-arm64"
-      - "goabout/kustomize-sopssecretgenerator:v{{ .Major }}-arm64"
-      - "goabout/kustomize-sopssecretgenerator:v{{ .Major }}.{{ .Minor }}-arm64"
-      - "goabout/kustomize-sopssecretgenerator:v{{ .Major }}.{{ .Minor }}.{{ .Patch }}-arm64"
-
-docker_manifests:
-  - name_template: goabout/kustomize-sopssecretgenerator:latest
-    image_templates:
-      - goabout/kustomize-sopssecretgenerator:latest-amd64
-      - goabout/kustomize-sopssecretgenerator:latest-arm64
-  - name_template: goabout/kustomize-sopssecretgenerator:v{{ .Major }}
-    image_templates:
-      - goabout/kustomize-sopssecretgenerator:v{{ .Major }}-amd64
-      - goabout/kustomize-sopssecretgenerator:v{{ .Major }}-arm64
-  - name_template: goabout/kustomize-sopssecretgenerator:v{{ .Major }}.{{ .Minor }}
-    image_templates:
-      - goabout/kustomize-sopssecretgenerator:v{{ .Major }}.{{ .Minor }}-amd64
-      - goabout/kustomize-sopssecretgenerator:v{{ .Major }}.{{ .Minor }}-arm64
-  - name_template: goabout/kustomize-sopssecretgenerator:v{{ .Major }}.{{ .Minor }}.{{ .Patch }}
-    image_templates:
-      - goabout/kustomize-sopssecretgenerator:v{{ .Major }}.{{ .Minor }}.{{ .Patch }}-amd64
-      - goabout/kustomize-sopssecretgenerator:v{{ .Major }}.{{ .Minor }}.{{ .Patch }}-arm64
+  prerelease: auto
+  make_latest: false
