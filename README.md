@@ -135,6 +135,20 @@ files:
 
 Like SecretGenerator, SopsSecretGenerator supports the [generatorOptions](https://kubernetes-sigs.github.io/kustomize/api-reference/kustomization/generatoroptions/) fields. Additionally, labels and annotations are copied over to the Secret. Data key-values ("envs") can be read from dotenv, INI, YAML and JSON files. If the data is a file and the Secret data key needs to be different from the filename, you can specify the key by adding `desiredKey=filename` instead of just the filename.
 
+Use `input-type` and `output-type` as generator-wide defaults when all sources share a format. They accept `binary`, `dotenv`, `ini`, `json`, or `yaml`; omitted types are selected from each source's filename. To override formats for an individual source, append `:input-type=...` and/or `,output-type=...` to that source entry. Per-source values override the corresponding generator-wide defaults.
+
+For example, the two files below use different encrypted formats, and the JSON file is emitted as YAML:
+
+    apiVersion: goabout.com/v1beta1
+    kind: SopsSecretGenerator
+    metadata:
+      name: my-secret
+    files:
+      - secret.enc:input-type=json,output-type=yaml
+      - credentials.enc:input-type=dotenv,output-type=dotenv
+
+The per-source suffix also works with the existing `key=filename` form, for example `secret-file2.txt=secret-file2.sops.txt:input-type=json,output-type=yaml`.
+
 An example showing all options:
 
     apiVersion: goabout.com/v1beta1
